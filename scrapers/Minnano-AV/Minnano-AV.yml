@@ -1,5 +1,10 @@
 name: "Minnano-AV (EN)"
 # requires: py_common
+# minnano-av.com puts its search page behind a Cloudflare challenge that
+# cloudscraper cannot solve, so name searches need FlareSolverr (see
+# py_common/proxy.py). Set flaresolverr_url in config.ini (created next to
+# Minnano-AV.py on first run), or the FLARESOLVERR_URL environment variable,
+# if FlareSolverr is not at http://localhost:8191/v1.
 performerByURL:
   - url:
       - minnano-av.com
