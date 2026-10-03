@@ -1,16 +1,28 @@
 from base64 import b64encode
 import json
+import os
 import re
 import sys
 from typing import Any
+from urllib.parse import quote
 
 import py_common.log as log
+from py_common.config import get_config
 from py_common.util import scraper_args
 from py_common.types import ScrapedPerformer
 from lxml import etree
-import cloudscraper
 
-scraper = cloudscraper.create_scraper()
+config = get_config(
+    default="""
+# FlareSolverr endpoint, used when Cloudflare blocks requests/cloudscraper
+# (minnano-av.com's search page requires it)
+flaresolverr_url = http://localhost:8191/v1
+"""
+)
+# py_common.proxy reads FLARESOLVERR_URL at import time
+os.environ.setdefault("FLARESOLVERR_URL", config.flaresolverr_url)
+
+from py_common.proxy import RequestBackend, stash_requests as scraper  # noqa: E402
 
 XPATHS = {
     "birthdate": "//span[text()='生年月日']/../p/text()",
@@ -182,6 +194,9 @@ def get_xpath_result(tree: Any, xpath_string: str) -> str | list[str] | None:
 def performer_by_url(url, lang="EN"):
     request = scraper.get(url)
     log.debug(request.status_code)
+    if RequestBackend.is_blocked(request):
+        log.error(f"Blocked by Cloudflare fetching {url}; is FlareSolverr reachable?")
+        sys.exit(1)
 
     tree = etree.HTML(request.text)
 
@@ -338,24 +353,29 @@ def performer_by_url(url, lang="EN"):
 
 
 def performer_by_name(name: str, lang="EN", retry=True) -> list[ScrapedPerformer]:
-    queryURL = f"https://www.minnano-av.com/search_result.php?search_scope=actress&search_word={name}"
+    queryURL = f"https://www.minnano-av.com/search_result.php?search_scope=actress&search_word={quote(name)}"
 
     result = scraper.get(queryURL)
+    if RequestBackend.is_blocked(result):
+        log.error("Search blocked by Cloudflare; is FlareSolverr reachable?")
+        sys.exit(1)
     tree = etree.HTML(result.text)
 
     if re.search(REGEXES["url"], result.url):
         return [{"name": name, "urls": [result.url]}]
-    elif search_result := get_xpath_result(tree, XPATHS["search"]):
+    elif search_result := tree.xpath(XPATHS["search"]):
         performer_list = []
 
         for node in search_result:
-            node_value = node
-            if "/" not in node_value:
+            node_value = node.text or ""
+            if " / " not in node_value:
                 continue
 
-            _, romanized_name = node_value.split(" / ")
-            performer: ScrapedPerformer = {"name": romanized_name}
-            if url_result := get_xpath_result(node, XPATHS["search_url"]):
+            _, romanized_name = node_value.split(" / ", 1)
+            performer: ScrapedPerformer = {"name": romanized_name.strip()}
+            if lang == "JP" and (kanji := node.xpath('../h2[@class="ttl"]/a/text()')):
+                performer["name"] = kanji[0].strip()
+            if url_result := node.xpath(XPATHS["search_url"]):
                 url = ""
                 if match := re.search(REGEXES["id"], url_result[0]):
                     url = str.format(FORMATS["url"], PERFORMER_ID=match[0])
@@ -367,20 +387,21 @@ def performer_by_name(name: str, lang="EN", retry=True) -> list[ScrapedPerformer
         return []
 
     modified_name = reverse_first_last_name(name)
-    return performer_by_name(modified_name, retry=False)
+    return performer_by_name(modified_name, lang, retry=False)
 
 
 if __name__ == "__main__":
     op, args = scraper_args(prog="Minnano-AV")
     result = None
     log.debug(f"{op}: {json.dumps(args)}")
+    lang = "JP" if "JP" in args.get("extra", []) else "EN"
     match op, args:
         case "performer-by-url", {"url": url}:
-            result = performer_by_url(url)
+            result = performer_by_url(url, lang)
         case "performer-by-name", {"name": name}:
-            result = performer_by_name(name)
+            result = performer_by_name(name, lang)
         case "performer-by-fragment", {"url": url}:
-            result = performer_by_url(url)
+            result = performer_by_url(url, lang)
         case _:
             log.error(f"Unknown operation {op}")
             sys.exit(1)
